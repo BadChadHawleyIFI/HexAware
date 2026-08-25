@@ -1,0 +1,12 @@
+{
+  "description": "Oracle for BillingPage.aspx / BillingPage.aspx.vb entries in the generated structural cache.",
+  "expectReferencesInclude": [
+    { "file": "VbLib/BillingPage.aspx.vb", "source": "BillingPage.aspx#btnSubmit.OnClick", "target": "btnSubmit_Click", "referenceType": "handles_event" },
+    { "file": "VbLib/BillingPage.aspx", "source": "#btnSubmit.onclick", "target": "confirmSubmit", "referenceType": "client_handles_event" },
+    { "file": "VbLib/BillingPage.aspx", "source": "confirmSubmit", "target": "btnSubmit", "referenceType": "postback_trigger" },
+    { "file": "VbLib/BillingPage.aspx", "source": "confirmSubmit", "target": "GetTaxAjax", "referenceType": "ajax_call" }
+  ],
+  "expectFunctionsInclude": [
+    { "file": "VbLib/BillingPage.aspx", "name": "confirmSubmit" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "description": "Oracle for JS variable support in hex-generate / hex-query.",
+  "file": "Scripts/site.js",
+  "expectVariablesInclude": [
+    { "name": "API_URL", "kind": "const" }
+  ],
+  "expectFunctionsInclude": [
+    { "name": "submitHandler", "note": "function-valued const, treated as a function not a variable" }
+  ],
+  "expectCallGraphInclude": [
+    { "caller": "submitHandler", "callee": "validateForm" }
+  ]
+}

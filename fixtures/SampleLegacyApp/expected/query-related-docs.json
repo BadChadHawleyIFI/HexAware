@@ -1,0 +1,11 @@
+{
+  "description": "Oracle for Checkpoint 11: relatedDocs (proximity + content search) in hex-query.",
+  "expectQuery": {
+    "method": "CalculateTax",
+    "expectRelatedDocsInclude": [
+      { "file": "README.md", "nearby": true, "mentionsSymbol": true },
+      { "file": "OperationsNotes.docx", "nearby": true, "mentionsSymbol": false }
+    ]
+  },
+  "note": "mentionsSymbol is computed live from disk at query time (not cached), so it stays accurate even against a stale cache as long as the doc file itself hasn't moved."
+}

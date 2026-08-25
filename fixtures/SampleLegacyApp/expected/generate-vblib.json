@@ -1,0 +1,8 @@
+{
+  "description": "Oracle for VbLib.DerivedClass.vb entries in the generated structural cache.",
+  "file": "VbLib/DerivedClass.vb",
+  "expectReferencesInclude": [
+    { "source": "VbLib.DerivedClass", "target": "VbLib.BaseClass", "referenceType": "inherits" },
+    { "source": "VbLib.DerivedClass.SubmitButton", "target": "VbLib.DerivedClass.SubmitButton_Click", "referenceType": "handles_event" }
+  ]
+}

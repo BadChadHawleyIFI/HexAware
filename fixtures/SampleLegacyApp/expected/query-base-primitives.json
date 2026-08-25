@@ -1,0 +1,23 @@
+{
+  "description": "Oracle for Checkpoint 12: new base query primitives --file, --class, --search.",
+  "class_DerivedClass": {
+    "expectInheritsFrom": ["VbLib.BaseClass"],
+    "expectDerivedClasses": []
+  },
+  "class_BaseClass": {
+    "expectInheritsFrom": [],
+    "expectDerivedClasses": ["VbLib.DerivedClass"]
+  },
+  "file_BillingPageAspxVb": {
+    "expectFunctionNamesInclude": ["btnSubmit_Click", "GetTaxAjax"],
+    "expectClassNamesInclude": ["BillingPage"]
+  },
+  "search_tax": {
+    "expectKindsAndNames": [
+      { "kind": "function", "name": "CalculateTax" },
+      { "kind": "function", "name": "GetTaxAjax" },
+      { "kind": "section", "name": "TaxApiUrl", "file": "appsettings.json" },
+      { "kind": "section", "name": "TaxApiUrl", "file": "settings.ini" }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "description": "Oracle for `hex-query --method CalculateTax` against the SampleLegacyApp fixture cache.",
+  "expect": [
+    {
+      "id": "VbLib.DerivedClass.CalculateTax",
+      "callersInclude": ["CSharpLib.Caller.RunBilling", "VbLib.DerivedClass.SubmitButton_Click"],
+      "calleesInclude": ["VbLib.BaseClass.LogMessage"]
+    }
+  ]
+}

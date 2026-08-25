@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="HexContracts/HexContracts.csproj" />
+  <Project Path="HexGenerate/HexGenerate.csproj" />
+  <Project Path="HexQuery/HexQuery.csproj" />
+  <Folder Name="/fixtures/" />
+  <Folder Name="/fixtures/SampleLegacyApp/">
+    <Project Path="fixtures/SampleLegacyApp/CSharpLib/CSharpLib.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,11 @@
+{
+  "description": "Oracle for document/config capture (Checkpoint 10) in hex-generate / hex-query.",
+  "expectSectionsInclude": [
+    { "file": "README.md", "name": "Getting Started", "level": 2 },
+    { "file": "App.config", "name": "appSettings", "level": 1 },
+    { "file": "appsettings.json", "name": "TaxApiUrl", "level": 0 },
+    { "file": "settings.ini", "name": "TaxApiUrl", "level": 0 },
+    { "file": "OperationsNotes.docx", "name": "Deployment Notes", "level": 1 }
+  ],
+  "note": "TaxApiUrl appears in both appsettings.json and settings.ini; hex-query --method TaxApiUrl must return both."
+}

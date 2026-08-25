@@ -1,0 +1,19 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/*
+!.vscode/extensions.json
+
+# Generated structural cache (regenerate with hex-generate)
+.ha/
+
+# User-specific files
+*.user
+*.suo
+
+# OS junk
+.DS_Store
+Thumbs.db
