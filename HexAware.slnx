@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="HexAware.Tests/HexAware.Tests.csproj" />
   <Project Path="HexContracts/HexContracts.csproj" />
   <Project Path="HexGenerate/HexGenerate.csproj" />
   <Project Path="HexQuery/HexQuery.csproj" />

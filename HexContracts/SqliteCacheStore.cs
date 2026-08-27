@@ -19,7 +19,24 @@ public static class CacheSchema
         );
         CREATE TABLE IF NOT EXISTS Files (
             path TEXT PRIMARY KEY,
-            language TEXT NOT NULL
+            language TEXT NOT NULL,
+            project TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Projects (
+            name TEXT PRIMARY KEY,
+            assemblyName TEXT NOT NULL,
+            language TEXT NOT NULL,
+            path TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ProjectReferences (
+            sourceProject TEXT NOT NULL,
+            targetProject TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS PackageReferences (
+            project TEXT NOT NULL,
+            packageName TEXT NOT NULL,
+            version TEXT,
+            source TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS Functions (
             id TEXT PRIMARY KEY,
@@ -57,7 +74,9 @@ public static class CacheSchema
             file TEXT NOT NULL,
             caller TEXT NOT NULL,
             callee TEXT NOT NULL,
-            lineNumber INTEGER NOT NULL
+            lineNumber INTEGER NOT NULL,
+            callerAssembly TEXT,
+            calleeAssembly TEXT
         );
         CREATE TABLE IF NOT EXISTS ReferenceEdges (
             file TEXT NOT NULL,
@@ -77,8 +96,14 @@ public static class CacheSchema
         CREATE INDEX IF NOT EXISTS idx_sections_file ON Sections(file);
         CREATE INDEX IF NOT EXISTS idx_callgraph_caller ON CallGraph(caller);
         CREATE INDEX IF NOT EXISTS idx_callgraph_callee ON CallGraph(callee);
+        CREATE INDEX IF NOT EXISTS idx_callgraph_calleeassembly ON CallGraph(calleeAssembly COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_refs_source ON ReferenceEdges(source);
         CREATE INDEX IF NOT EXISTS idx_refs_target ON ReferenceEdges(target);
+        CREATE INDEX IF NOT EXISTS idx_files_project ON Files(project);
+        CREATE INDEX IF NOT EXISTS idx_projectrefs_source ON ProjectReferences(sourceProject);
+        CREATE INDEX IF NOT EXISTS idx_projectrefs_target ON ProjectReferences(targetProject);
+        CREATE INDEX IF NOT EXISTS idx_packagerefs_project ON PackageReferences(project);
+        CREATE INDEX IF NOT EXISTS idx_packagerefs_name ON PackageReferences(packageName COLLATE NOCASE);
         """;
 }
 
@@ -115,10 +140,34 @@ public static class SqliteCacheStore
 
         using (var filesCmd = connection.CreateCommand())
         {
-            filesCmd.CommandText = "SELECT path, language FROM Files";
+            filesCmd.CommandText = "SELECT path, language, project FROM Files";
             using var reader = filesCmd.ExecuteReader();
             while (reader.Read())
-                cache.Files[reader.GetString(0)] = new FileStructuralResult { Language = reader.GetString(1) };
+                cache.Files[reader.GetString(0)] = new FileStructuralResult { Language = reader.GetString(1), Project = reader.IsDBNull(2) ? null : reader.GetString(2) };
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT name, assemblyName, language, path FROM Projects";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                cache.Projects.Add(new HexProjectInfo { Name = reader.GetString(0), AssemblyName = reader.GetString(1), Language = reader.GetString(2), Path = reader.GetString(3) });
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT sourceProject, targetProject FROM ProjectReferences";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                cache.ProjectReferences.Add(new ProjectReferenceInfo { SourceProject = reader.GetString(0), TargetProject = reader.GetString(1) });
+        }
+
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT project, packageName, version, source FROM PackageReferences";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                cache.PackageReferences.Add(new PackageReferenceInfo { Project = reader.GetString(0), PackageName = reader.GetString(1), Version = reader.IsDBNull(2) ? null : reader.GetString(2), Source = reader.GetString(3) });
         }
 
         using (var cmd = connection.CreateCommand())
@@ -195,7 +244,7 @@ public static class SqliteCacheStore
 
         using (var cmd = connection.CreateCommand())
         {
-            cmd.CommandText = "SELECT file, caller, callee, lineNumber FROM CallGraph";
+            cmd.CommandText = "SELECT file, caller, callee, lineNumber, callerAssembly, calleeAssembly FROM CallGraph";
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
@@ -206,6 +255,8 @@ public static class SqliteCacheStore
                     Caller = reader.GetString(1),
                     Callee = reader.GetString(2),
                     LineNumber = reader.GetInt32(3),
+                    CallerAssembly = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    CalleeAssembly = reader.IsDBNull(5) ? null : reader.GetString(5),
                 });
             }
         }
@@ -252,6 +303,9 @@ public static class SqliteCacheStore
 
         using var transaction = connection.BeginTransaction();
 
+        var seenFunctionIds = new HashSet<string>(StringComparer.Ordinal);
+        var seenClassIds = new HashSet<string>(StringComparer.Ordinal);
+
         void Exec(string sql, Action<SqliteCommand> bind)
         {
             using var cmd = connection.CreateCommand();
@@ -264,16 +318,50 @@ public static class SqliteCacheStore
         Exec("INSERT INTO Meta (key, value) VALUES ('generatedAt', @v)", c => c.Parameters.AddWithValue("@v", cache.GeneratedAt.ToString("o")));
         Exec("INSERT INTO Meta (key, value) VALUES ('gitCommitHash', @v)", c => c.Parameters.AddWithValue("@v", cache.GitCommitHash));
 
+        foreach (var proj in cache.Projects)
+        {
+            Exec("INSERT INTO Projects (name, assemblyName, language, path) VALUES (@name, @asm, @lang, @path)", c =>
+            {
+                c.Parameters.AddWithValue("@name", proj.Name);
+                c.Parameters.AddWithValue("@asm", proj.AssemblyName);
+                c.Parameters.AddWithValue("@lang", proj.Language);
+                c.Parameters.AddWithValue("@path", proj.Path);
+            });
+        }
+
+        foreach (var pref in cache.ProjectReferences)
+        {
+            Exec("INSERT INTO ProjectReferences (sourceProject, targetProject) VALUES (@src, @tgt)", c =>
+            {
+                c.Parameters.AddWithValue("@src", pref.SourceProject);
+                c.Parameters.AddWithValue("@tgt", pref.TargetProject);
+            });
+        }
+
+        foreach (var pkg in cache.PackageReferences)
+        {
+            Exec("INSERT INTO PackageReferences (project, packageName, version, source) VALUES (@proj, @name, @ver, @src)", c =>
+            {
+                c.Parameters.AddWithValue("@proj", pkg.Project);
+                c.Parameters.AddWithValue("@name", pkg.PackageName);
+                c.Parameters.AddWithValue("@ver", (object?)pkg.Version ?? DBNull.Value);
+                c.Parameters.AddWithValue("@src", pkg.Source);
+            });
+        }
+
         foreach (var (path, file) in cache.Files)
         {
-            Exec("INSERT INTO Files (path, language) VALUES (@path, @language)", c =>
+            Exec("INSERT INTO Files (path, language, project) VALUES (@path, @language, @project)", c =>
             {
                 c.Parameters.AddWithValue("@path", path);
                 c.Parameters.AddWithValue("@language", file.Language);
+                c.Parameters.AddWithValue("@project", (object?)file.Project ?? DBNull.Value);
             });
 
             foreach (var fn in file.Functions)
             {
+                if (!seenFunctionIds.Add(fn.Id)) continue;
+
                 Exec("INSERT INTO Functions (id, file, name, lineStart, lineEnd, returnType, paramsJson) VALUES (@id, @file, @name, @s, @e, @rt, @params)", c =>
                 {
                     c.Parameters.AddWithValue("@id", fn.Id);
@@ -300,6 +388,8 @@ public static class SqliteCacheStore
 
             foreach (var cls in file.Classes)
             {
+                if (!seenClassIds.Add(cls.Id)) continue;
+
                 Exec("INSERT INTO Classes (id, file, name, lineStart, lineEnd, methodsJson, propertiesJson) VALUES (@id, @file, @name, @s, @e, @m, @p)", c =>
                 {
                     c.Parameters.AddWithValue("@id", cls.Id);
@@ -326,12 +416,14 @@ public static class SqliteCacheStore
 
             foreach (var cg in file.CallGraph)
             {
-                Exec("INSERT INTO CallGraph (file, caller, callee, lineNumber) VALUES (@file, @caller, @callee, @line)", c =>
+                Exec("INSERT INTO CallGraph (file, caller, callee, lineNumber, callerAssembly, calleeAssembly) VALUES (@file, @caller, @callee, @line, @callerAsm, @calleeAsm)", c =>
                 {
                     c.Parameters.AddWithValue("@file", path);
                     c.Parameters.AddWithValue("@caller", cg.Caller);
                     c.Parameters.AddWithValue("@callee", cg.Callee);
                     c.Parameters.AddWithValue("@line", cg.LineNumber);
+                    c.Parameters.AddWithValue("@callerAsm", (object?)cg.CallerAssembly ?? DBNull.Value);
+                    c.Parameters.AddWithValue("@calleeAsm", (object?)cg.CalleeAssembly ?? DBNull.Value);
                 });
             }
 

@@ -14,7 +14,7 @@ MSBuildLocator.RegisterDefaults();
 var slnOption = new Option<FileInfo>("--sln") { Description = "Path to the .sln solution file.", Required = true };
 var outputOption = new Option<FileInfo?>("--output")
 {
-    Description = "Destination cache file path (a SQLite database). Defaults to <solution-directory>/.ha/roslyn-structural-cache.db, " +
+    Description = "Destination cache file path (a SQLite database). Defaults to <solution-directory>/.ha/HexAware-cache.db, " +
                   "so the cache lives with the project (and can be committed to source control) regardless of " +
                   "the working directory the CLI is invoked from.",
 };
@@ -34,7 +34,7 @@ rootCommand.SetAction(async parseResult =>
 {
     var sln = parseResult.GetValue(slnOption)!;
     var output = parseResult.GetValue(outputOption)
-        ?? new FileInfo(Path.Combine(Path.GetDirectoryName(sln.FullName)!, ".ha", "roslyn-structural-cache.db"));
+        ?? new FileInfo(Path.Combine(Path.GetDirectoryName(sln.FullName)!, ".ha", "HexAware-cache.db"));
     var full = parseResult.GetValue(fullOption);
     await Generate.HandleGenerateAsync(sln.FullName, output.FullName, full);
     return 0;
@@ -80,6 +80,29 @@ static class Generate
             var compilation = await project.GetCompilationAsync();
             if (compilation == null) continue;
 
+            // Solution-level structure (independent of the per-file walk below): the project itself, its
+            // in-solution project-to-project dependencies, and its external package/assembly references.
+            cache.Projects.Add(new HexProjectInfo
+            {
+                Name = project.Name,
+                AssemblyName = project.AssemblyName,
+                Language = project.Language == "Visual Basic" ? "vbnet" : "csharp",
+                Path = project.FilePath != null ? ToRelative(solutionDir, project.FilePath) : string.Empty,
+            });
+
+            foreach (var projectRef in project.ProjectReferences)
+            {
+                var targetProject = solution.GetProject(projectRef.ProjectId);
+                if (targetProject != null)
+                    cache.ProjectReferences.Add(new ProjectReferenceInfo { SourceProject = project.Name, TargetProject = targetProject.Name });
+            }
+
+            if (project.FilePath != null)
+            {
+                ParsePackageReferences(project, cache);
+                ParsePackagesConfig(project, cache);
+            }
+
             foreach (var document in project.Documents)
             {
                 // Case-insensitive: Windows file systems don't guarantee ".designer.vb" casing.
@@ -110,7 +133,7 @@ static class Generate
                 if (syntaxTree == null || semanticModel == null) continue;
 
                 var root = await syntaxTree.GetRootAsync();
-                var result = new FileStructuralResult { Language = project.Language == "Visual Basic" ? "vbnet" : "csharp" };
+                var result = new FileStructuralResult { Language = project.Language == "Visual Basic" ? "vbnet" : "csharp", Project = project.Name };
                 var namedTypes = root.DescendantNodes()
                                      .Select(node => semanticModel.GetDeclaredSymbol(node))
                                      .OfType<INamedTypeSymbol>()
@@ -145,9 +168,10 @@ static class Generate
                         if (member.IsImplicitlyDeclared || member.MethodKind is MethodKind.PropertyGet or MethodKind.PropertySet)
                             continue;
 
-                        // Consistent "Namespace.Type.Method" id for every language, independent of ToDisplayString()'s
-                        // language-specific default format (VB's default includes "Public Sub ...()", C#'s doesn't).
-                        var methodNodeId = $"{classNodeId}.{member.Name}";
+                        // Include the parameter type list so overloaded methods in the same type produce a unique,
+                        // deterministic key instead of collapsing to the same SQLite `Functions.id` value.
+                        var methodNodeId = FunctionId.Create(classNodeId, member.Name,
+                            member.Parameters.Select(p => p.Type.ToDisplayString()));
                         var methodSpan = member.Locations.FirstOrDefault(l => l.IsInSource)?.GetLineSpan();
 
                         result.Functions.Add(new FunctionInfo
@@ -192,10 +216,16 @@ static class Generate
                     var lineNumber = syntaxTree.GetLineSpan(invocation.Span).StartLinePosition.Line + 1;
                     result.CallGraph.Add(new CallGraphEntry
                     {
-                        // Same "Namespace.Type.Method" scheme as FunctionInfo.Id above, so Query can join the two.
-                        Caller = $"{callerSymbol.ContainingType.ToDisplayString()}.{callerSymbol.Name}",
-                        Callee = $"{calleeSymbol.ContainingType.ToDisplayString()}.{calleeSymbol.Name}",
+                        // Match the same unique signature-based IDs used by FunctionInfo.Id so Query joins stay stable.
+                        Caller = FunctionId.Create(callerSymbol.ContainingType.ToDisplayString(), callerSymbol.Name,
+                            callerSymbol.Parameters.Select(p => p.Type.ToDisplayString())),
+                        Callee = FunctionId.Create(calleeSymbol.ContainingType.ToDisplayString(), calleeSymbol.Name,
+                            calleeSymbol.Parameters.Select(p => p.Type.ToDisplayString())),
                         LineNumber = lineNumber,
+                        // ContainingAssembly lets Query answer "how many methods call into library X" directly
+                        // from real semantic data, instead of guessing from namespaces/file paths.
+                        CallerAssembly = callerSymbol.ContainingAssembly?.Name,
+                        CalleeAssembly = calleeSymbol.ContainingAssembly?.Name,
                     });
                 }
 
@@ -225,6 +255,88 @@ static class Generate
     // Forward slashes regardless of OS, so cache files are identical whether generated on Windows or not.
     private static string ToRelative(string baseDir, string absolutePath) =>
         Path.GetRelativePath(baseDir, absolutePath).Replace(Path.DirectorySeparatorChar, '/');
+
+    // Best-effort project attribution for files outside the Roslyn document walk (markup, JS, docs/configs):
+    // the project whose directory is the longest containing-path match wins (handles nested project dirs).
+    private static string? FindOwningProject(StructuralCache cache, string relativeFilePath)
+    {
+        string? bestMatch = null;
+        var bestLength = -1;
+        foreach (var proj in cache.Projects)
+        {
+            if (string.IsNullOrEmpty(proj.Path)) continue;
+            var projDir = Path.GetDirectoryName(proj.Path)?.Replace('\\', '/') ?? "";
+            if (projDir.Length == 0) continue;
+            var isMatch = relativeFilePath.Equals(projDir, StringComparison.OrdinalIgnoreCase)
+                || relativeFilePath.StartsWith(projDir + "/", StringComparison.OrdinalIgnoreCase);
+            if (isMatch && projDir.Length > bestLength)
+            {
+                bestLength = projDir.Length;
+                bestMatch = proj.Name;
+            }
+        }
+        return bestMatch;
+    }
+
+    // SDK-style <PackageReference Include="X" Version="Y" /> declarations. Legacy <Reference> elements
+    // whose HintPath resolves into a packages/ folder are intentionally skipped here — those are captured
+    // with accurate version info by ParsePackagesConfig instead, to avoid double-counting the same package.
+    private static void ParsePackageReferences(Project project, StructuralCache cache)
+    {
+        if (project.FilePath == null) return;
+        try
+        {
+            var doc = System.Xml.Linq.XDocument.Load(project.FilePath);
+            foreach (var el in doc.Descendants().Where(e => e.Name.LocalName == "PackageReference"))
+            {
+                var name = el.Attribute("Include")?.Value;
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                var version = el.Attribute("Version")?.Value
+                    ?? el.Elements().FirstOrDefault(c => c.Name.LocalName == "Version")?.Value;
+                cache.PackageReferences.Add(new PackageReferenceInfo { Project = project.Name, PackageName = name, Version = version, Source = "PackageReference" });
+            }
+
+            foreach (var el in doc.Descendants().Where(e => e.Name.LocalName == "Reference"))
+            {
+                var include = el.Attribute("Include")?.Value;
+                if (string.IsNullOrWhiteSpace(include)) continue;
+                var hintPath = el.Elements().FirstOrDefault(c => c.Name.LocalName == "HintPath")?.Value;
+                if (hintPath != null && hintPath.Contains("packages", StringComparison.OrdinalIgnoreCase))
+                    continue; // captured via packages.config instead
+
+                var simpleName = include.Split(',')[0].Trim();
+                cache.PackageReferences.Add(new PackageReferenceInfo { Project = project.Name, PackageName = simpleName, Version = null, Source = "Reference" });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[!] Could not parse package references for {project.Name}: {ex.Message}");
+        }
+    }
+
+    // Legacy NuGet's packages.config, sitting next to the project file — the authoritative version source
+    // for old-style .csproj/.vbproj projects that reference packages via <Reference HintPath="packages\...">.
+    private static void ParsePackagesConfig(Project project, StructuralCache cache)
+    {
+        if (project.FilePath == null) return;
+        var packagesConfigPath = Path.Combine(Path.GetDirectoryName(project.FilePath)!, "packages.config");
+        if (!File.Exists(packagesConfigPath)) return;
+        try
+        {
+            var doc = System.Xml.Linq.XDocument.Load(packagesConfigPath);
+            foreach (var el in doc.Descendants().Where(e => e.Name.LocalName == "package"))
+            {
+                var id = el.Attribute("id")?.Value;
+                if (string.IsNullOrWhiteSpace(id)) continue;
+                var version = el.Attribute("version")?.Value;
+                cache.PackageReferences.Add(new PackageReferenceInfo { Project = project.Name, PackageName = id, Version = version, Source = "packages.config" });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[!] Could not parse packages.config for {project.Name}: {ex.Message}");
+        }
+    }
 
     // --- WEB FORMS MARKUP PARSING (tree-sitter HTML grammar) — Increment 5 ---
     // "OnClick" (server postback, PascalCase) vs "onclick" (client JS, lowercase) are distinct relationships;
@@ -297,7 +409,7 @@ static class Generate
                     else if (attrName.StartsWith("on", StringComparison.Ordinal))
                     {
                         // Client-side handler: onclick="jsFunction()" -> JS function, recorded on this page's own entry.
-                        cache.Files.TryAdd(relativeMarkupPath, new FileStructuralResult { Language = "aspx" });
+                        cache.Files.TryAdd(relativeMarkupPath, new FileStructuralResult { Language = "aspx", Project = FindOwningProject(cache, relativeMarkupPath) });
                         cache.Files[relativeMarkupPath].References.Add(new ReferenceResolution
                         {
                             Source = $"#{controlId ?? "?"}.{attrName}",
@@ -314,7 +426,7 @@ static class Generate
             {
                 var rawText = capture.Node.NamedChildren.FirstOrDefault(c => c.Type == "raw_text");
                 if (rawText == null) continue;
-                cache.Files.TryAdd(relativeMarkupPath, new FileStructuralResult { Language = "aspx" });
+                cache.Files.TryAdd(relativeMarkupPath, new FileStructuralResult { Language = "aspx", Project = FindOwningProject(cache, relativeMarkupPath) });
                 // Offset by the raw_text node's real position in the .aspx file — otherwise reported line
                 // numbers are relative to the extracted snippet, not the original markup file.
                 ParseJavaScriptSource(rawText.Text, cache.Files[relativeMarkupPath], rawText.StartPosition.Row);
@@ -363,7 +475,7 @@ static class Generate
             }
 
             reprocessed.Add(relativePath);
-            var result = new FileStructuralResult { Language = "javascript" };
+            var result = new FileStructuralResult { Language = "javascript", Project = FindOwningProject(cache, relativePath) };
             ParseJavaScriptSource(File.ReadAllText(jsPath), result);
             cache.Files[relativePath] = result;
         }
@@ -398,7 +510,7 @@ static class Generate
 
             var ext = Path.GetExtension(path);
             var isConfig = ConfigExtensions.Contains(ext, StringComparer.OrdinalIgnoreCase);
-            var result = new FileStructuralResult { Language = isConfig ? "config" : "document" };
+            var result = new FileStructuralResult { Language = isConfig ? "config" : "document", Project = FindOwningProject(cache, relativePath) };
 
             try
             {

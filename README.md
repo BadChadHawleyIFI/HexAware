@@ -36,10 +36,14 @@
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Getting started](#getting-started)
+  - [Run locally without installing](#run-locally-without-installing)
+  - [Install the tools globally](#install-the-tools-globally)
+  - [Publish standalone binaries](#publish-standalone-binaries)
 - [`hex-generate` — build the cache](#hex-generate--build-the-cache)
 - [`hex-query` — read the cache](#hex-query--read-the-cache)
   - [Base lookups](#base-lookups)
   - [Onboarding lookups](#onboarding-lookups)
+  - [Project and dependency lookups](#project-and-dependency-lookups)
   - [Output fields](#output-fields)
   - [Chaining queries together](#chaining-queries-together)
 - [Project layout](#project-layout)
@@ -131,7 +135,58 @@ cd HexAware
 dotnet build .\HexAware.slnx
 ```
 
-That builds `HexContracts`, `HexGenerate`, and `HexQuery`. Run either tool straight out of the build with `dotnet run --project`, or `dotnet publish` them for a standalone executable:
+That builds `HexContracts`, `HexGenerate`, and `HexQuery`.
+
+### Run locally without installing
+
+```bash
+dotnet run --project ./HexGenerate/HexGenerate.csproj -- --sln ./fixtures/SampleLegacyApp/SampleLegacyApp.sln
+dotnet run --project ./HexQuery/HexQuery.csproj -- --docs
+```
+
+### Install the tools globally
+
+The install scripts live in the `Install/` folder:
+
+- `Install/install-hexaware-tools.ps1` for Windows PowerShell
+- `Install/uninstall-hexaware-tools.ps1` for Windows PowerShell
+- `Install/install-hexaware-tools.sh` for bash on Linux/macOS
+- `Install/uninstall-hexaware-tools.sh` for bash on Linux/macOS
+
+From the repo root, run:
+
+Windows PowerShell:
+```powershell
+.\Install\install-hexaware-tools.ps1
+```
+
+Linux/macOS:
+```bash
+chmod +x ./Install/install-hexaware-tools.sh
+./Install/install-hexaware-tools.sh
+```
+
+After installation, the commands are available on your PATH:
+
+```bash
+hex-generate --help
+hex-query --help
+```
+
+To uninstall them:
+
+Windows PowerShell:
+```powershell
+.\Install\uninstall-hexaware-tools.ps1
+```
+
+Linux/macOS:
+```bash
+chmod +x ./Install/uninstall-hexaware-tools.sh
+./Install/uninstall-hexaware-tools.sh
+```
+
+### Publish standalone binaries
 
 ```bash
 dotnet publish HexGenerate -c Release -o ./tools
@@ -147,13 +202,13 @@ hex-generate --sln ./MyLegacyApp.sln
 | Option | Required | Description |
 |---|---|---|
 | `--sln` | ✅ | Path to the `.sln` file to analyze. |
-| `--output` | | Destination cache path. Defaults to `<solution-directory>/.ha/roslyn-structural-cache.db` — it lives with the project regardless of where you invoke the CLI from, so it can be committed alongside the code it describes. |
+| `--output` | | Destination cache path. Defaults to `<solution-directory>/.ha/HexAware-cache.db` — it lives with the project regardless of where you invoke the CLI from, so it can be committed alongside the code it describes. |
 | `--full` | | Force a complete rebuild. Without it, `hex-generate` only rescans files whose last-write time is newer than the cache's `generatedAt` (mtime-based, so uncommitted edits are always picked up) — everything else is reused as-is. |
 
 Every run prints exactly what happened:
 
 ```
-[+] Wrote structural cache: 2 file(s) rescanned, 16 reused unchanged, 18 total, at .../.ha/roslyn-structural-cache.db
+[+] Wrote structural cache: 2 file(s) rescanned, 16 reused unchanged, 18 total, at .../.ha/HexAware-cache.db
 ```
 
 ## `hex-query` — read the cache
@@ -170,7 +225,7 @@ hex-query --docs   # full built-in reference, readable by a human or an AI agent
 | `--method <name>` | Everything about one function/variable/config-or-doc-section: signature, callers, callees, event wire-ups, and related documentation. |
 | `--file <path>` | Everything in one file — functions, variables, classes, sections, call graph, references. Matches by exact path or substring. |
 | `--class <name>` | A class/type plus its inheritance **in both directions** — `inheritsFrom` and `derivedClasses` (the latter has no other lookup path). |
-| `--search <text>` | Fuzzy substring match across every function/variable/class/section name at once — for discovery when you don't know the exact name. |
+| `--search <text>` | Fuzzy substring match across every function/variable/class/section name, plus call-graph targets — including external/library symbols like `MigraDoc` or `PdfSharp` that are only ever referenced, never defined, in this codebase — for discovery when you don't know the exact name. |
 
 ### Onboarding lookups
 
@@ -180,7 +235,27 @@ hex-query --docs   # full built-in reference, readable by a human or an AI agent
 | `--entrypoints` | "Where does this program actually start running?" — functions with no in-graph callers, each tagged with *why* (a UI/framework wire-up, a conventional name, or genuinely unreferenced). |
 | `--hotspots [--top N]` | "What's the core logic everyone depends on?" — the N functions with the most distinct callers, most-depended-upon first. |
 
-Every command also accepts `--cache <path>` (defaults to `./.ha/roslyn-structural-cache.db`).
+### Project and dependency lookups
+
+Solution-level structure — architecture, not just source symbols. Answers the questions a source-only
+call graph can't: which project/package/assembly is actually depended on, and by how much.
+
+| Flag | Answers |
+|---|---|
+| `--projects` | Every project in the solution: file/function/class counts, in-solution project references (outgoing), dependents (incoming), and declared package references. |
+| `--project <name>` | Same detail as one row of `--projects`, plus the full file list for that project. |
+| `--packages` | Every **declared** external dependency (SDK-style `<PackageReference>`, legacy `packages.config`, or a plain `<Reference>`), grouped by package name and cross-checked against real in-graph call counts. Flags anything declared but never called as `no in-graph calls found` — a hint, not a verdict (see [Known limitations](#known-limitations)). |
+| `--assemblies` | Every assembly the call graph **actually** reaches, from real Roslyn symbol resolution — ranked by inbound call count, scoped `internal` (another project in this solution) or `external` (BCL/NuGet/GAC). The ground-truth companion to `--packages`. |
+| `--assembly <name>` | Directly answers *"how many methods call `QuickQuote` (or any assembly)"* — every distinct caller/callee pair and call site that crosses into it. |
+
+Example — "how many methods actually call into `QuickQuote`?":
+
+```bash
+hex-query --assemblies                 # rank every assembly by inbound call count
+hex-query --assembly QuickQuote_deploy  # every call site into it, by name
+```
+
+Every command also accepts `--cache <path>` (defaults to `./.ha/HexAware-cache.db`).
 
 ### Output fields
 
@@ -245,21 +320,27 @@ fixtures/            Synthetic legacy Web Forms solution used for development/ve
 | JavaScript | tree-sitter JS grammar | Functions, variables, `__doPostBack`, `PageMethods.*`, name-based call graph |
 | Documents | `.md`/`.docx`/`.txt`/`.rtf` | Headings as sections, full-text search for "is X documented?" |
 | Configs | `.json`/`.xml`/`.config`/`.ini`/`.yaml` | Top-level keys as queryable sections |
+| Solution structure | MSBuild `Project`/`ProjectReference` | Every project, its in-solution dependencies, and its dependents |
+| Package/assembly references | `<PackageReference>`, `packages.config`, `<Reference>` | Declared external dependencies per project, with version |
+| Assembly call attribution | Roslyn `ContainingAssembly` on every call graph edge | Ground-truth "how many methods call into library X", internal vs. external |
 
 ## Known limitations
 
 - `.doc` (legacy binary Word format) is registered but not parsed — no practical dependency-free path to its contents.
 - JavaScript call-graph resolution is name-based (JS is dynamically typed), unlike the fully compiler-verified C#/VB.NET graph.
 - Analyzing old-style, non-SDK `.csproj`/`.vbproj` projects requires a real MSBuild toolchain — the .NET SDK provides this out of the box.
+- `--packages` matches declared package names against called-into assembly names as a best-effort string match — they don't always agree (e.g. NuGet package `IFM.QuickQuoteDeploy` ships assembly `QuickQuote_deploy`). Treat `--packages`' `status` field as a hint; use `--assemblies`/`--assembly` for ground truth.
+- Project attribution for non-Roslyn files (markup/JS/docs/configs) is a best-effort directory match, not build-system-verified.
 
 ## Roadmap
 
-- Package both CLIs as `dotnet tool`s for one-command global install.
-- A native recursive `--callchain` primitive (multi-hop caller/callee walk in a single query, via a SQLite recursive CTE).
+- Add a native recursive `--callchain` primitive (multi-hop caller/callee walk in a single query, via a SQLite recursive CTE).
+- Graph-level reachability and unused-dependency analysis: `--related`, `--reachable`, `--unused`, `--depth` (see [Enhanced-Cache-Migration-Plan.md](Enhanced-Cache-Migration-Plan.md)).
+- Extend the query surface with richer cross-language dependency summaries and export workflows.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Update the copyright holder name in that file if you'd like it to be your own instead of the placeholder.
+This project is licensed under the GNU General Public License v3.0 (GPLv3). See [LICENSE](LICENSE) for the full text.
 
 ---
 

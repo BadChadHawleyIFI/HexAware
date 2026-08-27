@@ -6,16 +6,21 @@ using HexContracts;
 var cacheOption = new Option<FileInfo>("--cache")
 {
     Description = "Path to the generated structural cache (a SQLite database).",
-    DefaultValueFactory = _ => new FileInfo(".ha/roslyn-structural-cache.db"),
+    DefaultValueFactory = _ => new FileInfo(".ha/HexAware-cache.db"),
 };
 var methodOption = new Option<string?>("--method") { Description = "Name of the method/function/variable/section to inspect (exact name, case-insensitive)." };
 var fileOption = new Option<string?>("--file") { Description = "Relative path (or substring of one) of a file to summarize." };
 var classOption = new Option<string?>("--class") { Description = "Name of a class/type to inspect, including its inheritance chain in both directions." };
-var searchOption = new Option<string?>("--search") { Description = "Substring (case-insensitive) to find across all function/variable/class/section names, for discovery when the exact name is unknown." };
+var searchOption = new Option<string?>("--search") { Description = "Substring (case-insensitive) to find across all function/variable/class/section names, plus call-graph targets (including external/library symbols like MigraDoc or PdfSharp), for discovery when the exact name is unknown." };
 var overviewOption = new Option<bool>("--overview") { Description = "Print a repo-wide summary (file/function/class/variable counts, broken down by language) — a starting map for someone new to the codebase." };
 var entrypointsOption = new Option<bool>("--entrypoints") { Description = "List functions with no in-graph callers — candidates for where execution starts (Main, event handlers, framework-invoked lifecycle methods)." };
 var hotspotsOption = new Option<bool>("--hotspots") { Description = "List the functions with the most distinct callers — the most depended-upon code, worth understanding (and being careful with) first." };
 var topOption = new Option<int>("--top") { Description = "Max results to return for --hotspots.", DefaultValueFactory = _ => 10 };
+var projectsOption = new Option<bool>("--projects") { Description = "List every project in the solution, with file/function counts, in-solution project references, dependents, and declared package references." };
+var projectOption = new Option<string?>("--project") { Description = "Name of a single project to inspect in detail (case-insensitive, exact project name)." };
+var packagesOption = new Option<bool>("--packages") { Description = "List every externally-declared package/assembly reference across the solution (PackageReference, packages.config, or plain Reference), with which projects declare it and how many in-graph calls actually reach it." };
+var assembliesOption = new Option<bool>("--assemblies") { Description = "List every assembly actually called into by the code graph (from real Roslyn symbol resolution), ranked by inbound call count — the ground-truth version of --packages, independent of what's merely declared." };
+var assemblyOption = new Option<string?>("--assembly") { Description = "Name of a single assembly to inspect: every distinct caller/callee pair that crosses into it, e.g. \"how many methods call QuickQuote\"." };
 var docsOption = new Option<bool>("--docs") { Description = "Print self-documentation (usage, output schema, examples) for AI/human readers and exit." };
 
 var rootCommand = new RootCommand("Lean, dependency-free reader for the HexAware structural cache.");
@@ -28,6 +33,11 @@ rootCommand.Options.Add(overviewOption);
 rootCommand.Options.Add(entrypointsOption);
 rootCommand.Options.Add(hotspotsOption);
 rootCommand.Options.Add(topOption);
+rootCommand.Options.Add(projectsOption);
+rootCommand.Options.Add(projectOption);
+rootCommand.Options.Add(packagesOption);
+rootCommand.Options.Add(assembliesOption);
+rootCommand.Options.Add(assemblyOption);
 rootCommand.Options.Add(docsOption);
 
 rootCommand.SetAction(parseResult =>
@@ -44,16 +54,23 @@ rootCommand.SetAction(parseResult =>
     var className = parseResult.GetValue(classOption);
     var search = parseResult.GetValue(searchOption);
     var top = parseResult.GetValue(topOption);
+    var projectName = parseResult.GetValue(projectOption);
+    var packageName = parseResult.GetValue(assemblyOption);
 
     if (parseResult.GetValue(overviewOption)) { Query.RunOverview(cache.FullName); return 0; }
     if (parseResult.GetValue(entrypointsOption)) { Query.RunEntrypoints(cache.FullName); return 0; }
     if (parseResult.GetValue(hotspotsOption)) { Query.RunHotspots(cache.FullName, top); return 0; }
+    if (parseResult.GetValue(projectsOption)) { Query.RunProjects(cache.FullName); return 0; }
+    if (parseResult.GetValue(packagesOption)) { Query.RunPackages(cache.FullName); return 0; }
+    if (parseResult.GetValue(assembliesOption)) { Query.RunAssemblies(cache.FullName); return 0; }
+    if (!string.IsNullOrWhiteSpace(projectName)) { Query.RunProject(cache.FullName, projectName); return 0; }
+    if (!string.IsNullOrWhiteSpace(packageName)) { Query.RunAssembly(cache.FullName, packageName); return 0; }
     if (!string.IsNullOrWhiteSpace(file)) { Query.RunFile(cache.FullName, file); return 0; }
     if (!string.IsNullOrWhiteSpace(className)) { Query.RunClass(cache.FullName, className); return 0; }
     if (!string.IsNullOrWhiteSpace(search)) { Query.RunSearch(cache.FullName, search); return 0; }
     if (!string.IsNullOrWhiteSpace(method)) { Query.Run(cache.FullName, method); return 0; }
 
-    Console.WriteLine(JsonSerializer.Serialize(new { error = "One of --method, --file, --class, --search, --overview, --entrypoints, --hotspots is required (or pass --docs for usage help)." }));
+    Console.WriteLine(JsonSerializer.Serialize(new { error = "One of --method, --file, --class, --search, --overview, --entrypoints, --hotspots, --projects, --project, --packages, --assemblies, --assembly is required (or pass --docs for usage help)." }));
     return 1;
 });
 
@@ -77,7 +94,7 @@ static class Query
             --method   Name of the method/function to look up (case-insensitive, matches by simple name;
                        every overload/same-named method across files is returned as a separate result).
             --cache    Path to the structural cache (a SQLite database) produced by `hex-generate`.
-                       Defaults to ./.ha/roslyn-structural-cache.db (relative to the current directory).
+                       Defaults to ./.ha/HexAware-cache.db (relative to the current directory).
             --docs     Print this documentation and exit.
 
             ## Output: a JSON array, one entry per matching function
@@ -136,9 +153,13 @@ static class Query
                              types) and `derivedClasses` (other classes in the cache that inherit from
                              this one) — the latter has no other lookup path in this cache.
             --search <text>  Substring (not exact) match across every function/variable/class/section name
-                             at once, for discovery when the exact spelling/casing isn't known. Returns a
-                             flat, lightweight list `{ kind, name, file, language }` — no detail; follow up
-                             with --method/--class/--file on a specific hit for full detail.
+                             at once, for discovery when the exact spelling/casing isn't known. Also matches
+                             call-graph targets (kind "call-target"), which is the only way to find
+                             external/library symbols (e.g. MigraDoc, PdfSharp) that are referenced but never
+                             defined in this codebase, and so have no Functions/Classes row of their own.
+                             Returns a flat, lightweight list `{ kind, name, file, language }` (call-target
+                             hits add `assembly`) — no detail; follow up with --method/--class/--file, or
+                             --assembly for call-target hits, for full detail.
 
             ## Onboarding lookups (for a developer new to the codebase)
             --overview       Repo-wide map: total/per-language file, function, class, and variable counts,
@@ -152,6 +173,25 @@ static class Query
             --hotspots       The `--top` (default 10) functions with the most distinct in-graph callers,
                              most-called first. Answers "what's the core logic here that everything else
                              depends on, so I should understand it well before touching it".
+
+            ## Project and dependency lookups (solution-level structure, not just source symbols)
+            --projects       Every project in the solution: file/function/class counts, in-solution
+                             project references (outgoing), dependents (other projects that reference this
+                             one, incoming), and declared package/assembly references. A map of the
+                             solution's own architecture, not just its code.
+            --project <name> Same detail as one row of --projects, plus the full file list for that project.
+            --packages       Every externally-declared dependency (SDK-style <PackageReference>, legacy
+                             packages.config, or a plain <Reference>) across the whole solution, grouped by
+                             package name, cross-checked against real in-graph call counts. `status` flags
+                             anything declared but never actually called in the cache as "no in-graph calls
+                             found" (verify manually -- may be reflection/config/types-only usage).
+            --assemblies     Every assembly the call graph actually reaches (from real Roslyn symbol
+                             resolution, not name-matching), ranked by inbound call count. `scope` marks
+                             each as "internal" (another project in this solution) or "external" (BCL,
+                             NuGet package, or GAC reference). The ground-truth companion to --packages.
+            --assembly <name> Answers "how many methods call QuickQuote (or any assembly)": every distinct
+                             caller/callee pair and call site that crosses into it, plus whether it's an
+                             in-solution project and/or a declared package reference.
 
             These are deliberately simple, composable primitives rather than one large "answer everything"
             command — e.g. "who should review a change to X" is `--method X` (get callers) then `--method
@@ -605,6 +645,29 @@ static class Query
             AddHits("Classes", "class");
             AddHits("Sections", "section");
 
+            // External/library symbols (e.g. MigraDoc, PdfSharp) are referenced but never defined in
+            // this codebase, so they have no Functions/Classes row — they only ever appear as a callee
+            // in the call graph. Search that too, or "--search migra" would never find MigraDoc usage.
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT DISTINCT t.callee, t.file, fl.language, t.calleeAssembly
+                    FROM CallGraph t JOIN Files fl ON t.file = fl.path
+                    WHERE t.callee LIKE '%' || @s || '%'
+                    """;
+                cmd.Parameters.AddWithValue("@s", substring);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    hits.Add(new
+                    {
+                        kind = "call-target",
+                        name = reader.GetString(0),
+                        file = reader.GetString(1),
+                        language = reader.GetString(2),
+                        assembly = reader.IsDBNull(3) ? null : reader.GetString(3),
+                    });
+            }
+
             if (hits.Count == 0)
             {
                 Console.WriteLine(JsonSerializer.Serialize(new { message = "No matches found in the structural cache." }));
@@ -774,5 +837,304 @@ static class Query
             }
             Console.WriteLine(JsonSerializer.Serialize(results, CacheJson.Options));
         }
+    }
+
+    // --- --projects: every project in the solution, with fan-in/fan-out at the project level ---
+    public static void RunProjects(string cachePath)
+    {
+        if (!TryOpen(cachePath, out var connection)) return;
+        using (connection)
+        {
+            var names = new List<string>();
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT name FROM Projects ORDER BY name COLLATE NOCASE";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read()) names.Add(reader.GetString(0));
+            }
+
+            if (names.Count == 0)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new { message = "No projects found in the structural cache. Regenerate with a newer hex-generate to capture project metadata." }));
+                return;
+            }
+
+            var results = names.Select(n =>
+            {
+                var s = BuildProjectSummary(connection, n);
+                return new
+                {
+                    s.name,
+                    s.assemblyName,
+                    s.language,
+                    s.path,
+                    s.fileCount,
+                    s.functionCount,
+                    s.classCount,
+                    s.projectReferences,
+                    s.dependents,
+                    s.packageReferences,
+                };
+            }).ToList();
+            Console.WriteLine(JsonSerializer.Serialize(results, CacheJson.Options));
+        }
+    }
+
+    // --- --project <name>: one project's files, dependencies, dependents, and declared packages ---
+    public static void RunProject(string cachePath, string projectName)
+    {
+        if (!TryOpen(cachePath, out var connection)) return;
+        using (connection)
+        {
+            string? matchedName;
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT name FROM Projects WHERE name = @name COLLATE NOCASE";
+                cmd.Parameters.AddWithValue("@name", projectName);
+                matchedName = cmd.ExecuteScalar() as string;
+            }
+
+            if (matchedName == null)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new { message = "No project with that name found in the structural cache." }));
+                return;
+            }
+
+            var summary = BuildProjectSummary(connection, matchedName);
+            var files = new List<string>();
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT path FROM Files WHERE project = @name COLLATE NOCASE ORDER BY path";
+                cmd.Parameters.AddWithValue("@name", matchedName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read()) files.Add(reader.GetString(0));
+            }
+
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                summary.name,
+                summary.assemblyName,
+                summary.language,
+                summary.path,
+                summary.fileCount,
+                summary.functionCount,
+                summary.classCount,
+                summary.projectReferences,
+                summary.dependents,
+                summary.packageReferences,
+                files,
+            }, CacheJson.Options));
+        }
+    }
+
+    private static (string name, string assemblyName, string language, string path, int fileCount, int functionCount,
+        int classCount, List<string> projectReferences, List<string> dependents, List<object> packageReferences) BuildProjectSummary(
+        SqliteConnection connection, string name)
+    {
+        string assemblyName = "", language = "", path = "";
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT assemblyName, language, path FROM Projects WHERE name = @name";
+            cmd.Parameters.AddWithValue("@name", name);
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read()) { assemblyName = reader.GetString(0); language = reader.GetString(1); path = reader.GetString(2); }
+        }
+
+        int Scalar(string sql, string paramValue)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@name", paramValue);
+            return Convert.ToInt32(cmd.ExecuteScalar());
+        }
+
+        var fileCount = Scalar("SELECT COUNT(*) FROM Files WHERE project = @name COLLATE NOCASE", name);
+        var functionCount = Scalar("SELECT COUNT(*) FROM Functions f JOIN Files fl ON f.file = fl.path WHERE fl.project = @name COLLATE NOCASE", name);
+        var classCount = Scalar("SELECT COUNT(*) FROM Classes c JOIN Files fl ON c.file = fl.path WHERE fl.project = @name COLLATE NOCASE", name);
+
+        var projectReferences = QueryStringColumn(connection, "SELECT targetProject FROM ProjectReferences WHERE sourceProject = @name", name);
+        var dependents = QueryStringColumn(connection, "SELECT sourceProject FROM ProjectReferences WHERE targetProject = @name", name);
+
+        var packageReferences = new List<object>();
+        using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT packageName, version, source FROM PackageReferences WHERE project = @name COLLATE NOCASE ORDER BY packageName COLLATE NOCASE";
+            cmd.Parameters.AddWithValue("@name", name);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                packageReferences.Add(new { packageName = reader.GetString(0), version = reader.IsDBNull(1) ? null : reader.GetString(1), source = reader.GetString(2) });
+        }
+
+        return (name, assemblyName, language, path, fileCount, functionCount, classCount, projectReferences, dependents, packageReferences);
+    }
+
+    private static List<string> QueryStringColumn(SqliteConnection connection, string sql, string paramValue)
+    {
+        var results = new List<string>();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue("@name", paramValue);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) results.Add(reader.GetString(0));
+        return results;
+    }
+
+    // --- --packages: every DECLARED external dependency (PackageReference/packages.config/Reference), ---
+    // --- cross-checked against real in-graph call counts so declared-but-never-called ones stand out    ---
+    public static void RunPackages(string cachePath)
+    {
+        if (!TryOpen(cachePath, out var connection)) return;
+        using (connection)
+        {
+            var declarations = new List<(string PackageName, string Project, string? Version, string Source)>();
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT packageName, project, version, source FROM PackageReferences";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    declarations.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3)));
+            }
+
+            if (declarations.Count == 0)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new { message = "No package/assembly references found in the structural cache. Regenerate with a newer hex-generate to capture package metadata, or use --assemblies for call-graph-derived usage instead." }));
+                return;
+            }
+
+            var results = declarations
+                .GroupBy(d => d.PackageName, StringComparer.OrdinalIgnoreCase)
+                .Select(g =>
+                {
+                    int inboundCalls = 0, distinctCallers = 0;
+                    using (var cmd = connection.CreateCommand())
+                    {
+                        cmd.CommandText = "SELECT COUNT(*), COUNT(DISTINCT caller) FROM CallGraph WHERE calleeAssembly = @name COLLATE NOCASE";
+                        cmd.Parameters.AddWithValue("@name", g.Key);
+                        using var reader = cmd.ExecuteReader();
+                        if (reader.Read()) { inboundCalls = reader.GetInt32(0); distinctCallers = reader.GetInt32(1); }
+                    }
+
+                    return new
+                    {
+                        packageName = g.Key,
+                        versions = g.Select(d => d.Version).Where(v => v != null).Distinct().ToList(),
+                        declaredByProjects = g.Select(d => d.Project).Distinct().ToList(),
+                        sources = g.Select(d => d.Source).Distinct().ToList(),
+                        inboundCallCount = inboundCalls,
+                        distinctCallerCount = distinctCallers,
+                        status = inboundCalls > 0 ? "used" : "no in-graph calls found -- verify manually (may be used via reflection, config, or types-only reference)",
+                    };
+                })
+                .OrderByDescending(r => r.inboundCallCount)
+                .ToList();
+
+            Console.WriteLine(JsonSerializer.Serialize(results, CacheJson.Options));
+        }
+    }
+
+    // --- --assemblies: every assembly actually reached by the call graph, ranked by inbound calls ---
+    // --- (ground truth from Roslyn symbol resolution, independent of what's merely declared) ---
+    public static void RunAssemblies(string cachePath)
+    {
+        if (!TryOpen(cachePath, out var connection)) return;
+        using (connection)
+        {
+            var internalAssemblies = new HashSet<string>(QueryStringColumnNoParam(connection, "SELECT DISTINCT assemblyName FROM Projects"), StringComparer.OrdinalIgnoreCase);
+
+            var results = new List<object>();
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT calleeAssembly, COUNT(*) AS callCount, COUNT(DISTINCT caller) AS callerCount
+                    FROM CallGraph
+                    WHERE calleeAssembly IS NOT NULL AND calleeAssembly != ''
+                    GROUP BY calleeAssembly
+                    ORDER BY callCount DESC
+                    """;
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var name = reader.GetString(0);
+                    results.Add(new
+                    {
+                        assemblyName = name,
+                        inboundCallCount = reader.GetInt32(1),
+                        distinctCallerCount = reader.GetInt32(2),
+                        scope = internalAssemblies.Contains(name) ? "internal (in-solution project)" : "external (BCL, NuGet package, or GAC reference)",
+                    });
+                }
+            }
+
+            if (results.Count == 0)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new { message = "No assembly-attributed calls found in the structural cache. Regenerate with a newer hex-generate to capture assembly metadata." }));
+                return;
+            }
+            Console.WriteLine(JsonSerializer.Serialize(results, CacheJson.Options));
+        }
+    }
+
+    // --- --assembly <name>: "how many methods call QuickQuote (or any assembly)", with the actual call sites ---
+    public static void RunAssembly(string cachePath, string assemblyName)
+    {
+        if (!TryOpen(cachePath, out var connection)) return;
+        using (connection)
+        {
+            var calls = new List<object>();
+            var callers = new HashSet<string>(StringComparer.Ordinal);
+            var callees = new HashSet<string>(StringComparer.Ordinal);
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT caller, callee, file, lineNumber FROM CallGraph WHERE calleeAssembly = @name COLLATE NOCASE";
+                cmd.Parameters.AddWithValue("@name", assemblyName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var caller = reader.GetString(0);
+                    var callee = reader.GetString(1);
+                    callers.Add(caller);
+                    callees.Add(callee);
+                    calls.Add(new { caller, callee, file = reader.GetString(2), lineNumber = reader.GetInt32(3) });
+                }
+            }
+
+            if (calls.Count == 0)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new { message = "No in-graph calls found into that assembly. Check spelling/casing, or it may be unused, reflection-invoked, or types-only.", assemblyName }));
+                return;
+            }
+
+            var isInternalProject = Scalar1(connection, "SELECT COUNT(*) FROM Projects WHERE assemblyName = @name COLLATE NOCASE", assemblyName) > 0;
+            var isDeclaredPackage = Scalar1(connection, "SELECT COUNT(*) FROM PackageReferences WHERE packageName = @name COLLATE NOCASE", assemblyName) > 0;
+
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                assemblyName,
+                inboundCallCount = calls.Count,
+                distinctCallers = callers.ToList(),
+                distinctCallees = callees.ToList(),
+                isInternalProject,
+                isDeclaredPackage,
+                calls,
+            }, CacheJson.Options));
+        }
+    }
+
+    private static int Scalar1(SqliteConnection connection, string sql, string paramValue)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue("@name", paramValue);
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    private static List<string> QueryStringColumnNoParam(SqliteConnection connection, string sql)
+    {
+        var results = new List<string>();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) if (!reader.IsDBNull(0)) results.Add(reader.GetString(0));
+        return results;
     }
 }
