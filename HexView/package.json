@@ -1,0 +1,58 @@
+{
+  "name": "hexview",
+  "displayName": "HexView",
+  "description": "Visual graph explorer and chat companion for HexAware.",
+  "version": "0.0.1",
+  "publisher": "hexaware",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "hexview.open",
+        "title": "HexView: Open Graph Viewer"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "hexview",
+          "title": "HexView",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "hexview": [
+        {
+          "id": "hexview.launcher",
+          "name": "HexView",
+          "type": "webview",
+          "visibility": "visible"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test dist/graphData.test.js dist/graphLayout.test.js dist/hexQueryClient.test.js dist/markdown.test.js",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "^3.1.1"
+  }
+}
